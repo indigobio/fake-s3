@@ -231,6 +231,7 @@ module FakeS3
       request.header.each do |key, value|
         match = /^x-amz-meta-(.*)$/.match(key)
         if match
+          metadata[:custom_metadata] ||= {}
           metadata[:custom_metadata][match[1]] = value.join(', ')
         end
       end      
