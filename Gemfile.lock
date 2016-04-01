@@ -1,7 +1,7 @@
 PATH
   remote: .
   specs:
-    fakes3 (0.1.5.2)
+    fakes3 (0.1.6)
       builder
       thor
 
@@ -20,7 +20,7 @@ GEM
     right_aws (3.1.0)
       right_http_connection (>= 1.2.5)
     right_http_connection (1.4.0)
-    thor (0.18.1)
+    thor (0.19.1)
     xml-simple (1.1.2)
 
 PLATFORMS
