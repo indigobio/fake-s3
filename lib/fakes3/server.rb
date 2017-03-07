@@ -26,6 +26,12 @@ module FakeS3
     MOVE = "MOVE"
     DELETE_OBJECT = "DELETE_OBJECT"
     DELETE_BUCKET = "DELETE_BUCKET"
+    ADMIN_LIST_ALL = 'ADMIN_LIST_ALL'
+    ADMIN_TO_GLACIER = "ADMIN_TO_GLACIER"
+    ADMIN_TO_STANDARD = "ADMIN_TO_STANDARD"
+    ADMIN_TO_RESTORED_FROM_GLACIER = "ADMIN_TO_RESTORED_FROM_GLACIER"
+    ADMIN_TO_RESTORED_EXPIRED = "ADMIN_TO_RESTORED_EXPIRED"
+    ADMIN_TO_RESTORING_IN_PROGRESS = "ADMIN_TO_RESTORING_IN_PROGRESS"
 
     attr_accessor :bucket, :object, :type, :src_bucket,
                   :src_object, :method, :webrick_request,
@@ -42,6 +48,10 @@ module FakeS3
       puts "Src Object: #{@src_object}"
       puts "Query: #{@query}"
       puts "-----Done"
+    end
+
+    def admin_control?
+      bucket == 'ADMIN_CONTROL'
     end
   end
 
@@ -132,6 +142,21 @@ module FakeS3
         response['Last-Ranges'] = "bytes"
         response['Access-Control-Allow-Origin'] = '*'
 
+        days = real_obj.days ? real_obj.days : 1
+        yesterday = (Time.now - 24 * 60 * 60).strftime '%a, %d %b %Y %H:%M:%S %Z'
+        restore_expired = (Time.now + days * 24 * 60 * 60).strftime '%a, %d %b %Y %H:%M:%S %Z'
+        next_week = (Time.now + 7 * 24 * 60 * 60).strftime '%a, %d %b %Y %H:%M:%S %Z'
+        case real_obj.state
+          when S3Object::State::IN_GLACIER
+            response['x-amz-restore'] = "ongoing-request=\"false\""
+          when S3Object::State::RESTORING
+            response['x-amz-restore'] = "ongoing-request=\"true\""
+          when S3Object::State::RESTORED
+            response['x-amz-restore'] = "ongoing-request=\"false\", expiry-date=\"#{restore_expired}\""
+          when S3Object::State::RESTORED_COPY_EXPIRED
+            response['x-amz-restore'] = "ongoing-request=\"false\", expiry-date=\"#{yesterday}\""
+        end
+        response['x-amz-expiration'] = "expiry-date=\"#{next_week}\", rule-id=\"some_rule\""
         real_obj.custom_metadata.each do |header, value|
           response.header['x-amz-meta-' + header] = value
         end
@@ -167,6 +192,8 @@ module FakeS3
         else
           response.body = real_obj.io
         end
+      when Request::ADMIN_LIST_ALL
+        response.body = @store.list_all
       end
     end
 
@@ -196,6 +223,16 @@ module FakeS3
         response.header['ETag'] = "\"#{real_obj.md5}\""
       when Request::CREATE_BUCKET
         @store.create_bucket(s_req.bucket)
+      when Request::ADMIN_TO_GLACIER
+        @store.to_glacier s_req.bucket, s_req.object
+      when Request::ADMIN_TO_STANDARD
+        @store.to_standard s_req.bucket, s_req.object
+      when Request::ADMIN_TO_RESTORED_FROM_GLACIER
+        @store.to_restored_from_glacier s_req.bucket, s_req.object
+      when Request::ADMIN_TO_RESTORED_EXPIRED
+        @store.to_restored_expired s_req.bucket, s_req.object
+      when Request::ADMIN_TO_RESTORING_IN_PROGRESS
+        @store.to_restoring_in_progress s_req.bucket, s_req.object
       end
     end
 
@@ -299,6 +336,9 @@ module FakeS3
             eos
           end
         end
+      elsif request.body =~ /<Days>(\d+)<\/Days>/
+        days = $1 ? $1.to_i : 1
+        @store.to_restoring_in_progress s_req.bucket, s_req.object, days
       else
         raise WEBrick::HTTPStatus::BadRequest
       end
@@ -376,7 +416,9 @@ module FakeS3
           elems = path.split("/")
         end
 
-        if elems.size < 2
+        if s_req.admin_control?
+          s_req.type = Request::ADMIN_LIST_ALL
+        elsif elems.size < 2
           s_req.type = Request::LS_BUCKET
           s_req.query = query
         else
@@ -402,7 +444,23 @@ module FakeS3
         if s_req.is_path_style
           elems = path[1,path_len].split("/")
           s_req.bucket = elems[0]
-          if elems.size == 1
+          if s_req.admin_control?
+            op = elems[1]
+            s_req.bucket = elems[2]
+            s_req.object = elems[3,elems.size].join('/')
+            case op
+              when 'TO_GLACIER'
+                s_req.type = Request::ADMIN_TO_GLACIER
+              when 'TO_STANDARD'
+                s_req.type = Request::ADMIN_TO_STANDARD
+              when 'TO_RESTORED'
+                s_req.type = Request::ADMIN_TO_RESTORED_FROM_GLACIER
+              when 'TO_RESTORED_EXPIRED'
+                s_req.type = Request::ADMIN_TO_RESTORED_EXPIRED
+              when 'TO_RESTORING'
+                s_req.type = Request::ADMIN_TO_RESTORING_IN_PROGRESS
+            end
+          elsif elems.size == 1
             s_req.type = Request::CREATE_BUCKET
           else
             if webrick_req.request_line =~ /\?acl/

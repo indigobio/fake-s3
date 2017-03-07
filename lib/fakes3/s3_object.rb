@@ -1,7 +1,21 @@
 module FakeS3
   class S3Object
     include Comparable
-    attr_accessor :name,:size,:creation_date,:modified_date,:md5,:io,:content_type,:content_encoding,:custom_metadata
+    attr_accessor :name,:size,:creation_date,:modified_date,:md5,:io,:content_type,:content_encoding,:custom_metadata,:storage_class,:restore_expiration_date,:state,:days
+
+    module StorageClass
+      STANDARD = 'STANDARD'
+      REDUCED_REDUNDANCY = 'REDUCED_REDUNDANCY'
+      GLACIER = 'GLACIER'
+    end
+
+    module State
+      IN_STANDARD = 'IN_STANDARD'
+      IN_GLACIER = 'IN_GLACIER'
+      RESTORING = 'RESTORING'
+      RESTORED = 'RESTORED'
+      RESTORED_COPY_EXPIRED = 'RESTORED_COPY_EXPIRED'
+    end
 
     def hash
       @name.hash
