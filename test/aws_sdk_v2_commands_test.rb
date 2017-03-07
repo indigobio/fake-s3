@@ -1,5 +1,5 @@
 require 'test/test_helper'
-require 'aws-sdk'
+require 'aws-sdk-resources'
 
 class AwsSdkV2CommandsTest < Test::Unit::TestCase
   def setup
