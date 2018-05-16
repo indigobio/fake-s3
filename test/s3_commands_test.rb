@@ -41,10 +41,10 @@ class S3CommandsTest < Test::Unit::TestCase
 
   def test_store
     bucket = Bucket.create("ruby_aws_s3")
-    S3Object.store("hello","world","ruby_aws_s3")
+    S3Object.store("hello", "world", "ruby_aws_s3")
 
     output = ""
-    obj = S3Object.stream("hello","ruby_aws_s3") do |chunk|
+    obj = S3Object.stream("hello", "ruby_aws_s3") do |chunk|
       output << chunk
     end
     assert_equal "world", output
@@ -108,7 +108,6 @@ class S3CommandsTest < Test::Unit::TestCase
     assert_equal "one", obj.metadata[:param1]
     assert_equal "two, three", obj.metadata[:param2]
   end
-
 
   def test_multi_directory
     bucket = Bucket.create("ruby_aws_s3")

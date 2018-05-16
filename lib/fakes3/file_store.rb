@@ -8,12 +8,19 @@ require 'yaml'
 
 module FakeS3
   class FileStore
-    SHUCK_METADATA_DIR = ".fakes3_metadataFFF"
+    FAKE_S3_METADATA_DIR = ".fakes3_metadataFFF"
 
-    def initialize(root)
+    # S3 clients with overly strict date parsing fails to parse ISO 8601 dates
+    # without any sub second precision (e.g. jets3t v0.7.2), and the examples
+    # given in the official AWS S3 documentation specify three (3) decimals for
+    # sub second precision.
+    SUBSECOND_PRECISION = 3
+
+    def initialize(root, quiet_mode)
       @root = root
       @buckets = []
       @bucket_hash = {}
+      @quiet_mode = quiet_mode
       Dir[File.join(root,"*")].each do |bucket|
         bucket_name = File.basename(bucket)
         objects = objects_for_bucket(bucket_name)
@@ -47,7 +54,7 @@ module FakeS3
     end
 
     def get_bucket_folder(bucket)
-      File.join(@root,bucket.name)
+      File.join(@root, bucket.name)
     end
 
     def get_bucket(bucket)
@@ -55,8 +62,8 @@ module FakeS3
     end
 
     def create_bucket(bucket)
-      FileUtils.mkdir_p(File.join(@root,bucket))
-      bucket_obj = Bucket.new(bucket,Time.now,[])
+      FileUtils.mkdir_p(File.join(@root, bucket))
+      bucket_obj = Bucket.new(bucket, Time.now, [])
       if !@bucket_hash[bucket]
         @buckets << bucket_obj
         @bucket_hash[bucket] = bucket_obj
@@ -72,52 +79,64 @@ module FakeS3
       @bucket_hash.delete(bucket_name)
     end
 
-    def get_object(bucket,object_name, request)
+    def get_object(bucket, object_name, request)
       begin
         real_obj = S3Object.new
-        obj_root = File.join(@root,bucket,object_name,SHUCK_METADATA_DIR)
-        metadata = YAML.load(File.open(File.join(obj_root,"metadata"),'rb'))
+        obj_root = File.join(@root,bucket,object_name,FAKE_S3_METADATA_DIR)
+        metadata = File.open(File.join(obj_root, "metadata")) { |file| YAML::load(file) }
         real_obj.name = object_name
         real_obj.md5 = metadata[:md5]
-        real_obj.content_type = metadata.fetch(:content_type) { "application/octet-stream" }
-        #real_obj.io = File.open(File.join(obj_root,"content"),'rb')
-        real_obj.io = RateLimitableFile.open(File.join(obj_root,"content"),'rb')
+        real_obj.content_type = request&.query&.[]('response-content-type') ||
+          metadata.fetch(:content_type) { "application/octet-stream" }
+        real_obj.content_disposition = request&.query&.[]('response-content-disposition') ||
+          metadata[:content_disposition]
+        real_obj.content_encoding = metadata.fetch(:content_encoding) # if metadata.fetch(:content_encoding)
+        real_obj.io = RateLimitableFile.open(File.join(obj_root, "content"), 'rb')
         real_obj.size = metadata.fetch(:size) { 0 }
-        real_obj.creation_date = File.ctime(obj_root).iso8601()
-        real_obj.modified_date = metadata.fetch(:modified_date) { File.mtime(File.join(obj_root,"content")).iso8601() }
+        real_obj.creation_date = File.ctime(obj_root).utc.iso8601(SUBSECOND_PRECISION)
+        real_obj.modified_date = metadata.fetch(:modified_date) do
+          File.mtime(File.join(obj_root, "content")).utc.iso8601(SUBSECOND_PRECISION)
+        end
+        real_obj.cache_control = metadata[:cache_control]
         real_obj.custom_metadata = metadata.fetch(:custom_metadata) { {} }
         real_obj.storage_class = metadata[:storage_class]
         real_obj.state = metadata[:state]
         real_obj.days = metadata[:days]
         return real_obj
       rescue
-        puts $!
-        $!.backtrace.each { |line| puts line }
+        unless @quiet_mode
+          puts $!
+          $!.backtrace.each { |line| puts line }
+        end
         return nil
       end
     end
 
-    def object_metadata(bucket,object)
+    def object_metadata(bucket, object)
     end
 
-    def copy_object(src_bucket_name,src_name,dst_bucket_name,dst_name,request)
-      src_root = File.join(@root,src_bucket_name,src_name,SHUCK_METADATA_DIR)
-      src_metadata_filename = File.join(src_root,"metadata")
-      src_metadata = YAML.load(File.open(src_metadata_filename,'rb').read)
-      src_content_filename = File.join(src_root,"content")
+    def copy_object(src_bucket_name, src_name, dst_bucket_name, dst_name, request)
+      src_root = File.join(@root,src_bucket_name,src_name,FAKE_S3_METADATA_DIR)
+      src_metadata_filename = File.join(src_root, "metadata")
+      src_metadata = YAML.load(File.open(src_metadata_filename, 'rb').read)
+      src_content_filename = File.join(src_root, "content")
+
+      if src_metadata[:storage_class] == 'GLACIER'
+        raise "Source object must first be restored from glacier before copying: #{src_bucket_name}:#{src_name}"
+      end
 
       dst_filename= File.join(@root,dst_bucket_name,dst_name)
       FileUtils.mkdir_p(dst_filename)
 
-      metadata_dir = File.join(dst_filename,SHUCK_METADATA_DIR)
+      metadata_dir = File.join(dst_filename,FAKE_S3_METADATA_DIR)
       FileUtils.mkdir_p(metadata_dir)
 
-      content = File.join(metadata_dir,"content")
-      metadata = File.join(metadata_dir,"metadata")
+      content = File.join(metadata_dir, "content")
+      metadata = File.join(metadata_dir, "metadata")
 
       if src_bucket_name != dst_bucket_name || src_name != dst_name
-        File.open(content,'wb') do |f|
-          File.open(src_content_filename,'rb') do |input|
+        File.open(content, 'wb') do |f|
+          File.open(src_content_filename, 'rb') do |input|
             f << input.read
           end
         end
@@ -131,58 +150,84 @@ module FakeS3
 
       metadata_directive = request.header["x-amz-metadata-directive"].first
       if metadata_directive == "REPLACE"
-        metadata_struct = create_metadata(content,request)
+        metadata_struct = create_metadata(content, request)
         File.open(metadata,'w') do |f|
           f << YAML::dump(metadata_struct)
         end
       end
 
-      src_bucket = self.get_bucket(src_bucket_name)
-      dst_bucket = self.get_bucket(dst_bucket_name)
+      src_bucket = get_bucket(src_bucket_name) || create_bucket(src_bucket_name)
+      dst_bucket = get_bucket(dst_bucket_name) || create_bucket(dst_bucket_name)
 
       obj = S3Object.new
       obj.name = dst_name
       obj.md5 = src_metadata[:md5]
       obj.content_type = src_metadata[:content_type]
+      obj.content_disposition = src_metadata[:content_disposition]
+      obj.content_encoding = src_metadata[:content_encoding] # if src_metadata[:content_encoding]
       obj.size = src_metadata[:size]
       obj.modified_date = src_metadata[:modified_date]
+      obj.cache_control = src_metadata[:cache_control]
 
-      src_obj = src_bucket.find(src_name)
+      src_bucket.find(src_name)
       dst_bucket.add(obj)
-      src_bucket.remove(src_obj)
       return obj
     end
 
-    def store_object(bucket,object_name,request)
+    def begin_multi_upload(bucket, temp_name, request)
+      # meta_file should be in parts directory
+      dir = File.join(@root, bucket, temp_name)
+      FileUtils.mkdir_p(dir)
+      content = File.join(dir, 'empty')
+      initial_metadata = File.join(dir, 'initial_metadata.yml')
+      File.write(content, '')
+      metadata_struct = create_metadata(content, request)
+      File.open(initial_metadata,'w') do |f|
+        f << YAML::dump(metadata_struct)
+      end
+      FileUtils.rm_rf(content)
+    end
+
+    def store_object(bucket, object_name, request)
+      filedata = ""
+
+      # TODO put a tmpfile here first and mv it over at the end
+      content_type = request.content_type || ""
+
+      match = content_type.match(/^multipart\/form-data; boundary=(.+)/)
+      boundary = match[1] if match
+      if boundary
+        boundary = WEBrick::HTTPUtils::dequote(boundary)
+        form_data = WEBrick::HTTPUtils::parse_form_data(request.body, boundary)
+
+        if form_data['file'] == nil || form_data['file'] == ""
+          raise WEBrick::HTTPStatus::BadRequest
+        end
+
+        filedata = form_data['file']
+      else
+        request.body { |chunk| filedata << chunk }
+      end
+
+      do_store_object(bucket, object_name, filedata, request)
+    end
+
+    def do_store_object(bucket, object_name, filedata, request, custom_metadata: nil, amazon_metadata: nil)
       begin
-        filename = File.join(@root,bucket.name,object_name)
+        filename = File.join(@root, bucket.name, object_name)
         FileUtils.mkdir_p(filename)
 
-        metadata_dir = File.join(filename,SHUCK_METADATA_DIR)
+        metadata_dir = File.join(filename, FAKE_S3_METADATA_DIR)
         FileUtils.mkdir_p(metadata_dir)
 
-        content = File.join(filename,SHUCK_METADATA_DIR,"content")
-        metadata = File.join(filename,SHUCK_METADATA_DIR,"metadata")
+        content = File.join(filename, FAKE_S3_METADATA_DIR, "content")
+        metadata = File.join(filename, FAKE_S3_METADATA_DIR, "metadata")
 
-        # TODO put a tmpfile here first and mv it over at the end
+        File.open(content,'wb') { |f| f << filedata }
 
-        match=request.content_type.match(/^multipart\/form-data; boundary=(.+)/)
-        boundary = match[1] if match
-        if boundary
-          boundary = WEBrick::HTTPUtils::dequote(boundary)
-          filedata = WEBrick::HTTPUtils::parse_form_data(request.body, boundary)
-          raise HTTPStatus::BadRequest if filedata['file'].empty?
-          File.open(content, 'wb') do |f|
-            f << filedata['file']
-          end
-        else
-          File.open(content,'wb') do |f|
-            request.body do |chunk|
-              f << chunk
-            end
-          end
-        end
-        metadata_struct = create_metadata(content,request)
+        metadata_struct = create_metadata(content, request)
+        metadata_struct[:custom_metadata] = custom_metadata if custom_metadata
+        metadata_struct[:amazon_metadata] = custom_metadata if amazon_metadata
         File.open(metadata,'w') do |f|
           f << YAML::dump(metadata_struct)
         end
@@ -191,8 +236,11 @@ module FakeS3
         obj.name = object_name
         obj.md5 = metadata_struct[:md5]
         obj.content_type = metadata_struct[:content_type]
+        obj.content_disposition = metadata_struct[:content_disposition]
+        obj.content_encoding = metadata_struct[:content_encoding] # if metadata_struct[:content_encoding]
         obj.size = metadata_struct[:size]
         obj.modified_date = metadata_struct[:modified_date]
+        obj.cache_control = metadata_struct[:cache_control]
         obj.storage_class = metadata_struct[:storage_class]
         obj.custom_metadata = metadata_struct[:custom_metadata]
         obj.state = metadata_struct[:state]
@@ -200,16 +248,50 @@ module FakeS3
         bucket.add(obj)
         return obj
       rescue
-        puts $!
-        $!.backtrace.each { |line| puts line }
+        unless @quiet_mode
+          puts $!
+          $!.backtrace.each { |line| puts line }
+        end
         return nil
       end
+    end
+
+    def combine_object_parts(bucket, upload_id, object_name, parts, request)
+      upload_path   = File.join(@root, bucket.name)
+      tmp_object_path = "#{upload_id}_#{object_name}"
+      base_path     = File.join(upload_path, tmp_object_path)
+
+      complete_file = ""
+      chunk         = ""
+      part_paths    = []
+
+      parts.sort_by { |part| part[:number] }.each do |part|
+        part_path    = "#{base_path}_part#{part[:number]}"
+        content_path = File.join(part_path, FAKE_S3_METADATA_DIR, 'content')
+
+        File.open(content_path, 'rb') { |f| chunk = f.read }
+        etag = Digest::MD5.hexdigest(chunk)
+
+        raise new Error "invalid file chunk" unless part[:etag] == etag
+        complete_file << chunk
+        part_paths    << part_path
+      end
+
+      initial_yml_file = File.join(base_path, 'initial_metadata.yml')
+      md = YAML.load_file(initial_yml_file)
+      object = do_store_object(bucket, object_name, complete_file, request, custom_metadata: md[:custom_metadata], amazon_metadata: md[:amazon_metadata])
+
+      # clean up parts
+      tmp_dir = File.join(upload_path, Pathname.new(tmp_object_path).descend.first)
+      FileUtils.rm_rf(tmp_dir)
+
+      object
     end
 
     def delete_object(bucket,object_name,request)
       begin
         filename = File.join(@root,bucket.name,object_name)
-        FileUtils.rm_rf(filename)
+        remove_file_and_cleanup(filename)
         object = bucket.find(object_name)
         bucket.remove(object)
       rescue
@@ -219,22 +301,58 @@ module FakeS3
       end
     end
 
-    def create_metadata(content,request)
+    def delete_objects(bucket, objects, request)
+      begin
+        filenames = []
+        objects.each do |object_name|
+          filenames << File.join(@root,bucket.name,object_name)
+          object = bucket.find(object_name)
+          bucket.remove(object)
+        end
+
+        remove_file_and_cleanup(filenames)
+      rescue
+        puts $!
+        $!.backtrace.each { |line| puts line }
+        return nil
+      end
+    end
+
+    # TODO: abstract getting meta data from request.
+    def create_metadata(content, request)
       metadata = {}
       metadata[:md5] = Digest::MD5.file(content).hexdigest
       metadata[:content_type] = request.header["content-type"].first
+      if request.header['content-disposition']
+        metadata[:content_disposition] = request.header['content-disposition'].first
+      end
+
+      if request.header['cache-control']
+        metadata[:cache_control] = request.header['cache-control'].first
+      end
+
+      content_encoding = request.header["content-encoding"].first
+      metadata[:content_encoding] = content_encoding
+      #if content_encoding
+      #  metadata[:content_encoding] = content_encoding
+      #end
       metadata[:size] = File.size(content)
-      metadata[:modified_date] = File.mtime(content).utc.iso8601()
+      metadata[:modified_date] = File.mtime(content).utc.iso8601(SUBSECOND_PRECISION)
       metadata[:storage_class] = S3Object::StorageClass::STANDARD
       metadata[:state] = S3Object::State::IN_STANDARD
+      metadata[:amazon_metadata] = {}
+      metadata[:custom_metadata] = {}
 
+      # Add custom metadata from the request header
       request.header.each do |key, value|
-        match = /^x-amz-meta-(.*)$/.match(key)
-        if match
-          metadata[:custom_metadata] ||= {}
-          metadata[:custom_metadata][match[1]] = value.join(', ')
+        match = /^x-amz-([^-]+)-(.*)$/.match(key)
+        next unless match
+        if match[1].eql?('meta') && (match_key = match[2])
+          metadata[:custom_metadata][match_key] = value.join(', ')
+          next
         end
-      end      
+        metadata[:amazon_metadata][key.gsub(/^x-amz-/, '')] = value.join(', ')
+      end
       metadata
     end
 
@@ -320,7 +438,7 @@ module FakeS3
     end
 
     def metadata_file(bucket, object_name)
-      obj_root = File.join(@root,bucket,object_name,SHUCK_METADATA_DIR)
+      obj_root = File.join(@root,bucket,object_name,FAKE_S3_METADATA_DIR)
        File.join(obj_root, "metadata")
     end
 
@@ -333,16 +451,33 @@ module FakeS3
 
     def discover_object_names(dir, prefix)
       names = []
-      metadata_dir = File.join dir,SHUCK_METADATA_DIR
-      if Dir.exists? metadata_dir
+      metadata_dir = File.join dir,FAKE_S3_METADATA_DIR
+      if Dir.exist? metadata_dir
         names << prefix
       end
-      Dir[File.join(dir,'*')].select{|file| File.directory? file}.each do |dir|
+      Dir[File.join(dir, '*')].select(&File.method(:directory?)).each do |dir|
         dir_name = File.basename dir
         new_prefix = prefix.empty? ? dir_name : "#{prefix}/#{dir_name}"
         names += discover_object_names(dir, new_prefix)
       end
       names
+    end
+
+    def remove_file_and_cleanup(file)
+      p = Pathname.new(file)
+      return unless p.exist?
+      file_path = p.realpath
+      full_root = Pathname.new(@root).realpath
+      return if !file_path.to_s.start_with?(full_root.to_s) || file_path.to_s == full_root.to_s
+      file_path.join(FAKE_S3_METADATA_DIR).rmtree
+      file_path
+          .ascend
+          .select(&:exist?)
+          .select { |p| p.to_s.start_with?(full_root.to_s) }
+          .each do |p|
+        break unless p.directory? && p.empty? && p.parent.to_s != full_root.to_s
+        p.delete
+      end
     end
   end
 end
