@@ -6,7 +6,7 @@ class ControlCommandsTest < Test::Unit::TestCase
   def setup
     @test_root = File.expand_path('../../test_root', __FILE__)
     clear_test_root
-    @file_store = FakeS3::FileStore.new(@test_root)
+    @file_store = FakeS3::FileStore.new(@test_root, false)
     @s3 = AWS::S3.new(:access_key_id => '123',
                       :secret_access_key => 'abc',
                       :s3_endpoint => 'localhost',
@@ -22,11 +22,11 @@ class ControlCommandsTest < Test::Unit::TestCase
             "bucket_one \tsome/key/2  \tSTANDARD      \tIN_STANDARD \n" +
             "bucket_two \tsome/key/3  \tSTANDARD      \tIN_STANDARD \n" +
             "bucket_two \tsome/key/4  \tSTANDARD      \tIN_STANDARD "
-    assert_equal expected, FakeS3::FileStore.new(@test_root).list_all
+    assert_equal expected, FakeS3::FileStore.new(@test_root, false).list_all
   end
 
   def test_to_glacier
-    file_store = FakeS3::FileStore.new @test_root
+    file_store = FakeS3::FileStore.new @test_root, false
     assert_equal 'STANDARD', file_store.get_object('bucket_one', 'some/key/1', nil).storage_class
     file_store.to_glacier 'bucket_one', 'some/key/1'
     obj = file_store.get_object('bucket_one', 'some/key/1', nil)
@@ -35,7 +35,7 @@ class ControlCommandsTest < Test::Unit::TestCase
   end
 
   def test_to_standard
-    file_store = FakeS3::FileStore.new @test_root
+    file_store = FakeS3::FileStore.new @test_root, false
     file_store.to_glacier 'bucket_one', 'some/key/1'
     assert_equal 'GLACIER', file_store.get_object('bucket_one', 'some/key/1', nil).storage_class
     file_store.to_standard 'bucket_one', 'some/key/1'
@@ -45,7 +45,7 @@ class ControlCommandsTest < Test::Unit::TestCase
   end
 
   def test_to_restored_from_glacier
-    file_store = FakeS3::FileStore.new @test_root
+    file_store = FakeS3::FileStore.new @test_root, false
     file_store.to_glacier 'bucket_one', 'some/key/1'
     file_store.to_restored_from_glacier 'bucket_one', 'some/key/1'
     obj = file_store.get_object('bucket_one', 'some/key/1', nil)
@@ -54,7 +54,7 @@ class ControlCommandsTest < Test::Unit::TestCase
   end
 
   def test_to_restored_expired
-    file_store = FakeS3::FileStore.new @test_root
+    file_store = FakeS3::FileStore.new @test_root, false
     file_store.to_glacier 'bucket_one', 'some/key/1'
     file_store.to_restored_expired 'bucket_one', 'some/key/1'
     obj = file_store.get_object('bucket_one', 'some/key/1', nil)
@@ -63,7 +63,7 @@ class ControlCommandsTest < Test::Unit::TestCase
   end
 
   def test_to_restoring_in_progress
-    file_store = FakeS3::FileStore.new @test_root
+    file_store = FakeS3::FileStore.new @test_root, false
     file_store.to_restoring_in_progress 'bucket_one', 'some/key/1', 5
     obj = file_store.get_object('bucket_one', 'some/key/1', nil)
     assert_equal 'GLACIER', obj.storage_class
@@ -76,7 +76,7 @@ class ControlCommandsTest < Test::Unit::TestCase
     %w(bucket_one bucket_two).each do |bucket_name|
       bucket = @s3.buckets.create(bucket_name)
       2.times do
-        bucket.objects.create("some/key/#{key_count+=1}", 'some data')
+        bucket.objects.create("some/key/#{key_count += 1}", 'some data')
       end
     end
   end

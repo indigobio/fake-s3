@@ -109,7 +109,6 @@ class S3CommandsTest < Test::Unit::TestCase
     assert_equal "two, three", obj.metadata[:param2]
   end
 
-
   def test_multi_directory
     bucket = Bucket.create("ruby_aws_s3")
     S3Object.store("dir/myfile/123.txt","recursive","ruby_aws_s3")

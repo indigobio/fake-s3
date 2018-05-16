@@ -1,7 +1,8 @@
 module FakeS3
   class S3Object
     include Comparable
-    attr_accessor :name,:size,:creation_date,:modified_date,:md5,:io,:content_type,:content_encoding,:custom_metadata,:storage_class,:restore_expiration_date,:state,:days
+    attr_accessor :name,:size,:creation_date,:modified_date,:md5,:io,:content_type,:content_disposition,:content_encoding,:custom_metadata,:cache_control
+    attr_accessor :storage_class,:restore_expiration_date,:state,:days
 
     module StorageClass
       STANDARD = 'STANDARD'
