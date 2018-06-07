@@ -64,7 +64,7 @@ module FakeS3
       @store = store
       @hostname = hostname
       @port = server.config[:Port]
-      @root_hostnames = [hostname,'localhost','s3.amazonaws.com','s3.localhost']
+      @root_hostnames = [hostname,'localhost','s3.amazonaws.com','s3.localhost','lvh.me']
 
       # Here lies hard-coded defaults for CORS Configuration
       @cors_allow_origin = (cors_options['allow_origin'] or '*')
