@@ -20,8 +20,13 @@ module FakeS3
     method_option :corspreflightallowheaders, :type => :string, :desc => 'Access-Control-Allow-Headers header return value for preflight OPTIONS requests'
     method_option :corspostputallowheaders, :type => :string, :desc => 'Access-Control-Allow-Headers header return value for POST and PUT requests'
     method_option :corsexposeheaders, :type => :string, :desc => 'Access-Control-Expose-Headers header return value'
+    method_option :ppid, :type => :numeric, :required => false, :desc => 'Parent pid. Fake S3 terminates when its parent dies.'
 
     def server
+      if options[:ppid]
+        Watchdog.watch(options[:ppid])
+      end
+
       store = nil
       if options[:root]
         root = File.expand_path(options[:root])
@@ -78,6 +83,32 @@ FakeS3 #{FakeS3::VERSION}
 
 Copyright 2012, Curtis Spencer (@jubos)
 EOF
+    end
+
+    module Watchdog
+      module_function
+
+      def watch(ppid)
+        Thread.start do
+          loop do
+            sleep 1
+            if !process_running?(ppid)
+              puts "FakeS3 parent died. Exiting."
+              exit 1
+            end
+          end
+        end
+      end
+
+      # from https://github.com/wilsonsilva/process_exists/blob/master/lib/process_exists/core_ext/process.rb
+      def process_running?(pid)
+        Process.kill(0, pid)
+        true
+      rescue Errno::ESRCH # No such process
+        false
+      rescue Errno::EPERM # The process exists, but you dont have permission to send the signal to it.
+        true
+      end
     end
   end
 end
