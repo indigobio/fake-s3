@@ -420,11 +420,7 @@ module FakeS3
           elems = path.split("/")
         end
 
-        if elems.size == 0
-          s_req.type = Request::DELETE_OBJECTS
-          s_req.query = query
-          s_req.webrick_request = webrick_req
-        elsif elems.size == 1
+        if elems.size == 0 || elems.size == 1
           s_req.type = webrick_req.query_string == 'delete' ? Request::DELETE_OBJECTS : Request::DELETE_BUCKET
           s_req.query = query
           s_req.webrick_request = webrick_req
