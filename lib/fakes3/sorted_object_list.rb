@@ -35,8 +35,9 @@ module FakeS3
     def add(s3_object)
       return if !s3_object
 
-      @object_map[s3_object.name] = s3_object
-      @sorted_set << s3_object
+      if @sorted_set.add(s3_object)
+        @object_map[s3_object.name] = s3_object
+      end
     end
 
     def remove(s3_object)
